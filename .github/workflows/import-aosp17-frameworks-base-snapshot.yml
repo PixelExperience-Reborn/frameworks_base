@@ -1,0 +1,82 @@
+name: Stage exact AOSP17 frameworks/base source snapshot
+
+on:
+  push:
+    branches:
+      - ci/a17-frameworks-base-import-20261103
+    paths:
+      - .github/workflows/import-aosp17-frameworks-base-snapshot.yml
+
+permissions:
+  contents: write
+
+jobs:
+  pinned-current-tree:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      AOSP_URL: https://android.googlesource.com/platform/frameworks/base
+      AOSP_REF: refs/tags/android-17.0.0_r1
+      EXPECTED_COMMIT: 94b4c163b7dfe5ce3607f7bb8456f9573f7de57d
+      EXPECTED_TREE: 908a2ce43657451526181a33ee94fc688add3117
+      OUTPUT_BRANCH: port/a17-frameworks-base-aosp17-snapshot-20261103
+    steps:
+      - name: Shallow fetch current official release tree only
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/aosp17-base"
+          mkdir -p "$work"
+          git -C "$work" init -q
+          git -C "$work" remote add official "$AOSP_URL"
+          # A shallow source-only import does not imply full Google history.
+          git -C "$work" fetch --depth=1 --no-tags official "$AOSP_REF"
+          commit="$(git -C "$work" rev-parse 'FETCH_HEAD^{commit}')"
+          tree="$(git -C "$work" rev-parse "$commit^{tree}")"
+          test "$commit" = "$EXPECTED_COMMIT"
+          test "$tree" = "$EXPECTED_TREE"
+          git -C "$work" fsck --connectivity-only --no-reflogs
+          echo "Verified exact AOSP17 current source tree $tree"
+          large="$(git -C "$work" ls-tree -r -l "$EXPECTED_COMMIT" |
+            awk '$2 == "blob" && $4 ~ /^[0-9]+$/ && $4 > 100000000 {print}')"
+          if [[ -n "$large" ]]; then
+            echo "Refusing incomplete current source; oversized blobs:"
+            echo "$large"
+            exit 1
+          fi
+
+      - name: Publish exact tree as a root snapshot, without changing other branches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/aosp17-base"
+          dest="https://github.com/$GITHUB_REPOSITORY.git"
+          ref="refs/heads/$OUTPUT_BRANCH"
+          test -z "$(git ls-remote "$dest" "$ref" | cut -f1)" || {
+            echo "A snapshot branch already exists; refusing overwrite"
+            exit 1
+          }
+          {
+            echo "Import exact AOSP17 frameworks/base source tree (shallow snapshot)"
+            echo
+            echo "Official tag: android-17.0.0_r1"
+            echo "Official commit: $EXPECTED_COMMIT"
+            echo "Exact Git tree: $EXPECTED_TREE"
+            echo "Official upstream: $AOSP_URL"
+            echo
+            echo "This independent root snapshot is for preliminary PE delta work."
+            echo "It does not contain full Google history; the separate full-history"
+            echo "import is attempted independently. Old PE seventeen is unchanged."
+          } > "$RUNNER_TEMP/message.txt"
+          sha="$(GIT_AUTHOR_NAME='github-actions[bot]' \
+            GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+            GIT_COMMITTER_NAME='github-actions[bot]' \
+            GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+            git -C "$work" commit-tree "$EXPECTED_TREE" -F "$RUNNER_TEMP/message.txt")"
+          test "$(git -C "$work" rev-parse "$sha^{tree}")" = "$EXPECTED_TREE"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -C "$work" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --no-thin "$dest" "$sha:$ref"
+          echo "AOSP17 frameworks/base exact-tree snapshot commit $sha"
