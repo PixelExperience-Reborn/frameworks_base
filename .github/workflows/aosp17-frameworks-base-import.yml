@@ -18,58 +18,57 @@ concurrency:
 jobs:
   import-release-tree:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 350
     env:
       SOURCE_SHA: 94b4c163b7dfe5ce3607f7bb8456f9573f7de57d
       SOURCE_TREE: 908a2ce43657451526181a33ee94fc688add3117
       TARGET_BRANCH: port/a17-frameworks-base-aosp17-base-20261103
+      UPLOAD_BRANCH: port/a17-frameworks-base-upload-staging-20261103
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Fetch pinned upstream release and verify identity
+      - name: Checkout import tooling, not the legacy PE code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Fetch exact official AOSP17 release commit and verify tree
         shell: bash
         run: |
           set -euo pipefail
-          mkdir aosp-frameworks-base
-          cd aosp-frameworks-base
+          mkdir "$RUNNER_TEMP/aosp-fwbase"
+          cd "$RUNNER_TEMP/aosp-fwbase"
           git init -q
           git remote add aosp https://android.googlesource.com/platform/frameworks/base
-          # The full-history push previously failed with HTTP 500 in run
-          # 41638866565. Fetch just the release commit and its tree.
           git -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none \
             aosp refs/tags/android-17.0.0_r1
-          actual_sha="$(git rev-parse 'FETCH_HEAD^{commit}')"
-          actual_tree="$(git rev-parse 'FETCH_HEAD^{tree}')"
-          test "$actual_sha" = "$SOURCE_SHA"
-          test "$actual_tree" = "$SOURCE_TREE"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
+          test "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$SOURCE_TREE"
           git cat-file -e "$SOURCE_TREE^{tree}"
-          echo "Verified upstream commit: $actual_sha"
-          echo "Verified upstream tree: $actual_tree"
-      - name: Publish exact verified release tree without history rewrite
+          echo "Verified AOSP17 source commit $SOURCE_SHA / tree $SOURCE_TREE"
+      - name: Publish exact tree in resumable small batches
         shell: bash
         run: |
           set -euo pipefail
-          cd aosp-frameworks-base
+          cd "$RUNNER_TEMP/aosp-fwbase"
           git remote add publish "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          ref="refs/heads/$TARGET_BRANCH"
-          existing="$(git ls-remote --heads publish "$ref" | cut -f1)"
-          if [ -n "$existing" ]; then
-            echo "Target branch already exists. Refusing overwrite: $existing"
-            exit 1
-          fi
-          # Create a detached root with the IDENTICAL official AOSP17 tree.
-          # A different commit ID is intentional: GitHub rejected the full
-          # upstream history upload, so this is a release snapshot, not a
-          # false claim that the original AOSP commit was imported.
-          message="$(printf 'frameworks/base: verified AOSP 17.0.0_r1 source snapshot\n\nOfficial upstream commit: %s\nExact upstream tree: %s\nHistorical AOSP commit ancestry was not mirrored after GitHub HTTP 500.\nHistorical PixelExperience seventeen remains untouched.\n' "$SOURCE_SHA" "$SOURCE_TREE")"
-          snapshot="$(printf '%s\n' "$message" | \
-            GIT_AUTHOR_NAME='PixelExperience-Reborn CI' \
-            GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-            GIT_COMMITTER_NAME='PixelExperience-Reborn CI' \
-            GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-            git commit-tree "$SOURCE_TREE")"
-          test "$(git rev-parse "$snapshot^{tree}")" = "$SOURCE_TREE"
-          echo "Publishing snapshot commit: $snapshot"
-          git -c protocol.version=2 push --no-thin publish "$snapshot:$ref"
-          published="$(git ls-remote --heads publish "$ref" | cut -f1)"
-          test "$published" = "$snapshot"
-          echo "Verified published AOSP17 snapshot ref $published, tree $SOURCE_TREE"
+          export GIT_AUTHOR_NAME='PixelExperience-Reborn CI'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          python3 "$GITHUB_WORKSPACE/tools/chunked_import_aosp17.py" \
+            --repo "$PWD" \
+            --remote publish \
+            --source "$SOURCE_SHA" \
+            --tree "$SOURCE_TREE" \
+            --staging-branch "$UPLOAD_BRANCH" \
+            --final-branch "$TARGET_BRANCH" \
+            --chunk-files 250
+      - name: Verify published branch and exact official release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/aosp-fwbase"
+          git -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none \
+            publish "refs/heads/$TARGET_BRANCH"
+          actual="$(git rev-parse 'FETCH_HEAD^{tree}')"
+          test "$actual" = "$SOURCE_TREE"
+          echo "PASS: published frameworks/base AOSP17 tree $actual"
