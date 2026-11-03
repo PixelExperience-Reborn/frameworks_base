@@ -1,0 +1,31 @@
+name: AOSP17 PE framework-res resource checks
+
+on:
+  push:
+    branches:
+      - port/a17-frameworks-base-pe-20261103
+  pull_request:
+    paths:
+      - core/res/res/layout/transient_notification.xml
+      - core/res/res/layout/transient_notification_with_icon.xml
+      - core/res/res/drawable/toast_frame.xml
+      - tests/host/test_pe_toast_resources.py
+      - .github/workflows/aosp17-pe-framework-res-checks.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate-framework-res:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Android 17 PE working branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Run source-level resource regression tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests/host -p 'test_pe_*.py' -v
+      - name: Check patch whitespace
+        run: git diff --check HEAD~1 HEAD
