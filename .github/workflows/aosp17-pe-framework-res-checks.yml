@@ -1,0 +1,48 @@
+name: AOSP17 PE framework-res resource checks
+
+on:
+  pull_request:
+    branches:
+      - port/a17-frameworks-base-aosp17-base-20261103
+    paths:
+      - core/res/res/layout/transient_notification.xml
+      - core/res/res/layout/transient_notification_with_icon.xml
+      - core/res/res/drawable/toast_frame.xml
+      - tests/host/test_pe_toast_resources.py
+      - .github/workflows/aosp17-pe-framework-res-checks.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pe-a17-framework-res-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-framework-res:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download only exact PR-head resource files (no huge Git checkout)
+        env:
+          REVISION: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            core/res/res/layout/transient_notification.xml \
+            core/res/res/layout/transient_notification_with_icon.xml \
+            core/res/res/drawable/toast_frame.xml \
+            tests/host/test_pe_toast_resources.py
+          do
+            mkdir -p "$(dirname "$path")"
+            curl --fail --show-error --silent --location --retry 4 \
+              "https://raw.githubusercontent.com/PixelExperience-Reborn/frameworks_base/$REVISION/$path" \
+              -o "$path"
+            test -s "$path"
+            echo "Fetched $path at pinned commit $REVISION"
+          done
+      - name: Run actual source XML host regression suite
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests/host -p 'test_pe_*.py' -v
