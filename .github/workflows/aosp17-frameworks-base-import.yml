@@ -1,0 +1,59 @@
+name: Import official AOSP 17 frameworks/base (pinned)
+
+on:
+  push:
+    branches:
+      - port/a17-frameworks-base-import-20261103
+    paths:
+      - .github/workflows/aosp17-frameworks-base-import.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aosp17-frameworks-base-import
+  cancel-in-progress: false
+
+jobs:
+  import-verified-aosp-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Fetch and verify the exact official AOSP 17 revision
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: port/a17-frameworks-base-aosp17-base-20261103
+          SOURCE_SHA: 94b4c163b7dfe5ce3607f7bb8456f9573f7de57d
+          SOURCE_TREE: 908a2ce43657451526181a33ee94fc688add3117
+        run: |
+          set -euo pipefail
+          mkdir aosp-frameworks-base
+          cd aosp-frameworks-base
+          git init -q
+          git remote add aosp https://android.googlesource.com/platform/frameworks/base
+          # Keep full upstream history. Filter blob transfer while fetching,
+          # and let git fetch required objects for the publish push.
+          git -c protocol.version=2 fetch --no-tags --filter=blob:none aosp refs/tags/android-17.0.0_r1
+
+          actual_sha="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          actual_tree="$(git rev-parse 'FETCH_HEAD^{tree}')"
+          test "$actual_sha" = "$SOURCE_SHA"
+          test "$actual_tree" = "$SOURCE_TREE"
+          git cat-file -e "$SOURCE_SHA^{commit}"
+          git cat-file -e "$SOURCE_TREE^{tree}"
+          echo "Verified official commit: $actual_sha"
+          echo "Verified official tree: $actual_tree"
+
+          # This is a NEW branch, never a force push. The old PE seventeen
+          # branch and its history are never touched.
+          git remote add publish "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          existing="$(git ls-remote --heads publish "refs/heads/$TARGET_BRANCH" | cut -f1)"
+          if [ -n "$existing" ]; then
+            test "$existing" = "$SOURCE_SHA" || { echo "Target already differs; refusing to overwrite."; exit 1; }
+            echo "Pinned AOSP17 branch already matches source."
+            exit 0
+          fi
+          git push publish "$SOURCE_SHA:refs/heads/$TARGET_BRANCH"
+          echo "Published clean AOSP17 branch without rewriting historical PE refs."
