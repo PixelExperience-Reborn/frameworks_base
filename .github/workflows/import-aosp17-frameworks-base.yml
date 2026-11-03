@@ -1,0 +1,103 @@
+name: Import verified AOSP17 frameworks/base source
+
+on:
+  push:
+    branches:
+      - ci/a17-frameworks-base-import-20261103
+    paths:
+      - .github/workflows/import-aosp17-frameworks-base.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aosp17-frameworks-base-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    env:
+      AOSP_URL: https://android.googlesource.com/platform/frameworks/base
+      AOSP_REF: refs/tags/android-17.0.0_r1
+      EXPECTED_COMMIT: 94b4c163b7dfe5ce3607f7bb8456f9573f7de57d
+      EXPECTED_TREE: 908a2ce43657451526181a33ee94fc688add3117
+      OUTPUT_BRANCH: port/a17-frameworks-base-aosp17-base-20261103
+    steps:
+      - name: Fetch official AOSP17 source, verify commit/tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/aosp-base"
+          mkdir -p "$work"
+          git -C "$work" init -q
+          git -C "$work" remote add official "$AOSP_URL"
+          git -C "$work" fetch --no-tags official "$AOSP_REF"
+          commit="$(git -C "$work" rev-parse 'FETCH_HEAD^{commit}')"
+          tree="$(git -C "$work" rev-parse "$commit^{tree}")"
+          test "$commit" = "$EXPECTED_COMMIT" || { echo "Unexpected AOSP17 base commit $commit"; exit 1; }
+          test "$tree" = "$EXPECTED_TREE" || { echo "Unexpected AOSP17 base tree $tree"; exit 1; }
+          git -C "$work" fsck --connectivity-only --no-reflogs
+          echo "Verified source AOSP17 frameworks/base commit=$commit tree=$tree"
+
+      - name: Publish official branch without altering historical PE sources
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/aosp-base"
+          destination="https://github.com/$GITHUB_REPOSITORY.git"
+          ref="refs/heads/$OUTPUT_BRANCH"
+          current="$(git ls-remote "$destination" "$ref" | cut -f1)"
+          if [[ -n "$current" ]]; then
+            echo "Ref already exists at $current; refusing overwrite"
+            exit 1
+          fi
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          set +e
+          git -C "$work" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --no-thin "$destination" "$EXPECTED_COMMIT:$ref" \
+            > "$RUNNER_TEMP/import.log" 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            echo "Published AOSP17 frameworks/base with full upstream history."
+            exit 0
+          fi
+          tail -n 15 "$RUNNER_TEMP/import.log"
+          if ! grep -Eq "GH001|exceeds GitHub.s file size limit" "$RUNNER_TEMP/import.log"; then
+            echo "Unrelated import failure; refusing unverified source substitute"
+            exit "$status"
+          fi
+          oversized="$(git -C "$work" ls-tree -r -l "$EXPECTED_COMMIT" |
+            awk '$2 == "blob" && $4 ~ /^[0-9]+$/ && $4 > 100000000 {print}')"
+          if [[ -n "$oversized" ]]; then
+            echo "Current AOSP17 files exceed the GitHub limit, aborting:"
+            echo "$oversized"
+            exit 1
+          fi
+          {
+            echo "Import exact AOSP17 frameworks/base source snapshot"
+            echo
+            echo "Official tag: android-17.0.0_r1"
+            echo "Original commit: $EXPECTED_COMMIT"
+            echo "Verified source tree: $EXPECTED_TREE"
+            echo "Official upstream: $AOSP_URL"
+            echo
+            echo "Historic Git objects were rejected by GitHub's blob limit."
+            echo "This root commit preserves the exact current release files."
+            echo "Old PixelExperience history remains on the seventeen branch."
+          } > "$RUNNER_TEMP/source-message.txt"
+          snapshot="$(GIT_AUTHOR_NAME='github-actions[bot]' \
+            GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+            GIT_COMMITTER_NAME='github-actions[bot]' \
+            GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+            git -C "$work" commit-tree "$EXPECTED_TREE" -F "$RUNNER_TEMP/source-message.txt")"
+          test "$(git -C "$work" rev-parse "$snapshot^{tree}")" = "$EXPECTED_TREE"
+          git -C "$work" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --no-thin "$destination" "$snapshot:$ref"
+          echo "Published exact frameworks/base release tree as a snapshot."
